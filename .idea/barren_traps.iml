@@ -5,7 +5,13 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/.venv9" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.9 (barren_traps)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.12 (barren_traps)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+  <component name="PackageRequirementsSettings">
+    <option name="requirementsPath" value="" />
+  </component>
+  <component name="TestRunnerService">
+    <option name="PROJECT_TEST_RUNNER" value="py.test" />
   </component>
 </module>

@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import pennylane as qml
+# from catalyst import for_loop
 from qiskit import QuantumCircuit
 from qiskit.circuit.library import RXGate, RYGate, RZGate
 from qiskit.quantum_info import Clifford, Pauli, StabilizerState, random_pauli
@@ -88,10 +89,10 @@ class LocalVQA:
         z0 = params[n: 2 * n]
 
         num_x = len(params[2 * n:]) // 2
-        params = params[2 * n: 2 * n + num_x]
+        x = params[2 * n: 2 * n + num_x]
         z = params[2 * n + num_x:]
 
-        return x0, z0, params, z
+        return x0, z0, x.reshape(self.num_layers, self.num_qubits), z.reshape(self.num_layers, self.num_qubits)
 
     @property
     def qiskit_circuit(self) -> QuantumCircuit:
@@ -101,8 +102,28 @@ class LocalVQA:
         return qc
 
     @property
-    def penny_circuit(self):
+    def penny_circuit_from_qiskit(self):
         return qml.from_qiskit(self.qiskit_circuit)
+
+    def penny_circuit(self, params):
+        x0, z0, x, z = self.split_params(params)
+
+        for n in range(self.num_qubits):
+            qml.RX(x0[n], wires=n)
+            qml.RZ(z0[n], wires=n)
+
+        def entangling_layer(l):
+            start = l % 2
+            for n in range(0, self.num_qubits, 2):
+                i = (n + start) % self.num_qubits
+                j = (n + start + 1) % self.num_qubits
+                qml.CZ(wires=(i, j))
+
+            for n in range(self.num_qubits):
+                qml.RX(x[l, n], wires=n)
+                qml.RZ(z[l, n], wires=n)
+
+        qml.for_loop(0, self.num_layers, 1)(entangling_layer)()
 
     def expval(self, pauli_string: Union[str, Sequence[str]], x: np.ndarray, interface='jax') -> np.ndarray:
         if isinstance(pauli_string, str):
@@ -115,7 +136,7 @@ class LocalVQA:
 
         @qml.qnode(dev, interface=interface)
         def expectation():
-            self.penny_circuit(self._params_dict(x))
+            self.penny_circuit_from_qiskit(self._params_dict(x))
             return [qml.expval(obs) for obs in observables]
 
         if isinstance(pauli_string, str):
