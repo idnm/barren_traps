@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import Sequence, Union, List, Callable
 
 import jax
@@ -117,7 +118,8 @@ class LocalVQA:
 
         qml.for_loop(0, self.num_layers, 1)(entangling_layer)()
 
-    def expval(self, pauli_strings: Sequence[str]) -> Callable[[np.ndarray], np.ndarray]:
+    @cached_property
+    def _expval_func(self) -> Callable: #, pauli_strings: Sequence[str]) -> Callable[[np.ndarray], np.ndarray]:
 
         dev = qml.device('lightning.qubit', wires=self.num_qubits)
         @qml.qnode(dev)
@@ -125,15 +127,25 @@ class LocalVQA:
             self.penny_circuit(x)
             return qml.state()
 
-        observables = [qml.pauli.string_to_pauli_word(pauli) for pauli in pauli_strings]
         @qml.qjit
-        def expectation(x) -> np.ndarray:
-            state = circ(x).reshape([2] * self.num_qubits)
-            res = [qml.devices.qubit.measure(qml.expval(obs), state) for obs in observables]
-            return jnp.asarray(res)
+        def expectation(mat, x) -> np.ndarray:
+            print('compiling')
+            state = circ(x)
+            return (state.conj() * (mat @ state)).sum()
+
+            # res = [qml.devices.qubit.measure(qml.expval(obs), state) for obs in observables]
+            # return jnp.asarray(res)
+
+        # observables = [qml.pauli.string_to_pauli_word(pauli) for pauli in pauli_strings]
+        # matrices =
 
         return expectation
 
+    def expval(self, paulis: Sequence[str]) -> Callable[[np.ndarray], np.ndarray]:
+        observables = [qml.pauli.string_to_pauli_word(pauli) for pauli in paulis]
+        matrices = jnp.asarray([qml.matrix(obs, wire_order=range(self.num_qubits)) for obs in observables])
+
+        return lambda x: jax.vmap(lambda m: self._expval_func(m, x))(matrices)
     @staticmethod
     def _init_rng(rng: Union[np.random.Generator, int, None]) -> np.random.Generator:
         if isinstance(rng, int):
@@ -142,18 +154,19 @@ class LocalVQA:
             rng = np.random.default_rng(42)
         return rng
 
-    def uniform_variance(self, pauli_string: Sequence[str], num_samples=50, rng: Union[np.random.Generator, int, None] = None):
+    def uniform_variance(self, paulis: Sequence[str], num_samples=50, rng: Union[np.random.Generator, int, None] = None):
         rng = self._init_rng(rng)
-
         x = rng.uniform(0, 2 * np.pi, size=(num_samples, self.num_parameters))
-        values = jax.vmap(lambda xi: self.expval(pauli_string, xi))(x)
+
+        values = jax.vmap(self.expval(paulis))(x)
         sample_variance = values.var(axis=0)
         return sample_variance
 
-    def clifford_variance(self, pauli_string: Sequence[str], num_samples=50, rng: Union[np.random.Generator, int, None] = None):
+    def clifford_variance(self, paulis: Sequence[str], num_samples=50, rng: Union[np.random.Generator, int, None] = None):
         rng = self._init_rng(rng)
         x = np.pi / 2 * rng.choice(range(4), size=(num_samples, self.num_parameters), replace=True)
-        values = jax.vmap(lambda xi: self.expval(pauli_string, xi))(x)
+
+        values = jax.vmap(self.expval(paulis))(x)
         sample_variance = values.var(axis=0)
         return sample_variance
 
@@ -161,7 +174,7 @@ class LocalVQA:
         ek = np.zeros_like(params)
         ek[k] = 1
 
-        f = lambda p: self.expval(pauli_strings, params + np.pi / 2 * p)
+        f = lambda p: self._expval_func(pauli_strings, params + np.pi / 2 * p)
         return (f(ek) - f(-ek)) / 2
 
     def hess_expval(self, pauli_strings, k, l, params):
@@ -170,7 +183,7 @@ class LocalVQA:
         ek[k] = 1
         el[l] = 1
 
-        f = lambda p: self.expval(pauli_strings, params + np.pi / 2 * p)
+        f = lambda p: self._expval_func(pauli_strings, params + np.pi / 2 * p)
         return (f(ek + el) - f(ek - el) - f(el - ek) + f(-ek - el)) / 4
 
     def random_parameters(self, num_samples=None, rng=42):
@@ -224,7 +237,7 @@ class LocalVQA:
                 z0.append(np.pi / 2)
 
         good_params = np.concatenate([x0, z0, x, z])
-        assert np.allclose(np.abs(self.expval(pauli_string, good_params)), 1, atol=1e-5, rtol=1e-5)
+        assert np.allclose(np.abs(self._expval_func(pauli_string, good_params)), 1, atol=1e-5, rtol=1e-5)
         return good_params
 
     def draw(self):

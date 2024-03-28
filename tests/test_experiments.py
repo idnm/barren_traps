@@ -26,7 +26,7 @@ def test_find_nonzero_consistency():
     assert success
 
     # Check that the pauli found indeed has the correct expectation value at the point found.
-    assert np.allclose(vqa.expval(pauli, x), -1, atol=1e-5, rtol=1e-5)
+    assert np.allclose(vqa._expval_func(pauli, x), -1, atol=1e-5, rtol=1e-5)
 
 
 def test_free_angles_consistency():
@@ -50,7 +50,7 @@ def test_free_angles_consistency():
     y = vqa.random_parameters(num_samples=50, rng=rng)
     y[:, i_fixed] = x[i_fixed]
 
-    values = jax.vmap(lambda xi: vqa.expval(pauli, xi))(y)
+    values = jax.vmap(lambda xi: vqa._expval_func(pauli, xi))(y)
     assert np.allclose(values, -1, atol=1e-5, rtol=1e-5)
 
 def test_full_opt():
@@ -64,7 +64,7 @@ def test_full_opt():
     coefficients = rng.uniform(low=-1, high=1, size=len(observables))
 
     def loss(x):
-        values = vqa.expval(observables, x)
+        values = vqa._expval_func(observables, x)
         return (values * coefficients).sum()
 
     learning_rate = 0.01

@@ -13,18 +13,19 @@ import pennylane as qml
 
 
 def test_expvals():
-    num_qubits = 4
+    num_qubits = 6
     num_layers = 5
 
     vqa = LocalVQA(num_qubits, num_layers)
     paulis = all_two_body_pauli(num_qubits)
 
     x = vqa.random_parameters()
+    penny_exp = vqa.expval(paulis)(x)
+
 
     qs_circuit = vqa.qiskit_circuit.assign_parameters(vqa._params_dict(x))
     state = Statevector(qs_circuit)
     qs_exp = [state.expectation_value(Pauli(p[::-1])) for p in paulis]
-    penny_exp = vqa.expval(paulis)(x)
 
     assert np.allclose(qs_exp, penny_exp)
 
@@ -66,7 +67,7 @@ def test_grads(num_qubits, num_layers):
     obs = random_local_two_body_pauli(vqa.num_qubits)
 
     p0 = vqa.random_clifford_parameters()
-    f = lambda params: vqa.expval(obs, params, interface='jax')
+    f = lambda params: vqa._expval_func(obs, params, interface='jax')
 
     jax_grads = jax.grad(f)(p0)
     shift_grads = [vqa.grad_expval(obs, k, p0) for k in range(vqa.num_parameters)]

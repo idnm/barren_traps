@@ -6,20 +6,20 @@ from typing import Union, Sequence, Tuple
 import jax
 import numpy as np
 from matplotlib import pyplot as plt
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
-from pauli import all_local_two_body_pauli
+from pauli import all_local_two_body_pauli, all_two_body_pauli
 from traps import LocalVQA
 
 
-@dataclass
 class Experiment:
-    name: str
-    results: Union[dict, None] = None
-
-    def __post_init__(self):
-        if self.results is None:
+    def __init__(self, name: str, results: dict | None = None, aux: dict | None = None):
+        self.name = name
+        if results is None:
             self.results = defaultdict(dict)
+        else:
+            self.results = results
+        self.aux = aux
 
     def run(self):
         pass
@@ -42,28 +42,39 @@ class Experiment:
         plt.ylabel('Sample variance')
         plt.yscale('log', base=2)
 
-    def save(self):
-        with open(f'{self.name}', 'wb') as f:
-            pickle.dump(self.results, f)
+        plt.title(self.name)
+
+
+    def save(self, path='results'):
+        with open(path+'/'+self.name, 'wb') as f:
+            pickle.dump([self.results, self.aux], f)
 
     @classmethod
-    def load(cls, name: str):
-        with open(name, 'rb') as f:
-            exp = cls(name)
-            exp.results = pickle.load(f)
+    def load(cls, name: str, path='results'):
+        with open(path+'/'+name, 'rb') as f:
+            results, aux = pickle.load(f)
+            exp = cls(name=name, results=results, aux=aux)
             return exp
 
 
-@dataclass
-class UniformBPExperiment(Experiment):
+class BPExperiment(Experiment):
+    def __init__(self, name: str, results: dict | None = None, aux: dict | None = None):
+        assert 'method' in aux and aux['method'] in ('uniform', 'clifford')
+        super().__init__(name=name, results=results, aux=aux)
+
 
     def run(self, qubits: Sequence[int], layers: Sequence[int], num_samples: int, seed=42):
         rng = np.random.default_rng(seed)
         for n in tqdm(qubits):
-            observables = all_local_two_body_pauli(n)
+            observables = all_two_body_pauli(n)
             for l in tqdm(layers):
                 vqa = LocalVQA(n, l)
-                vars = vqa.uniform_variance(observables, num_samples=num_samples,
+                if self.aux['method'] == 'uniform':
+                    var_function = vqa.uniform_variance
+                elif self.aux['method'] == 'clifford':
+                    var_function = vqa.clifford_variance
+
+                vars = var_function(observables, num_samples=num_samples,
                                             rng=rng)  # (num_samples, num_observables)
                 self.results[n][l] = vars
                 self.save()
@@ -98,7 +109,7 @@ class ShallowingExperiment(Experiment):
                 x[:, i_cliff] = x_cliff
 
                 observables = all_local_two_body_pauli(num_qubits)
-                values.append(jax.vmap(lambda xi: vqa.expval(observables, xi))(x))
+                values.append(jax.vmap(lambda xi: vqa._expval_func(observables, xi))(x))
 
             self.results[num_fixed] = np.asarray(values).reshape(num_clifford_points * len(observables), num_samples)
             self.save()
@@ -119,6 +130,7 @@ class ShallowingExperiment(Experiment):
         plt.xlabel('Number of fixed parameters')
         plt.ylabel('Sample variance')
         plt.yscale('log', base=2)
+
 
 
 @dataclass
@@ -150,7 +162,7 @@ def find_nonzero_pauli(
     y = vqa.random_clifford_parameters(num_samples, rng)
     if len(i_fixed):
         y[:, i_fixed] = x[i_fixed]
-    expvals = jax.vmap(vqa.expval(paulis))(y)
+    expvals = jax.vmap(vqa._expval_func(paulis))(y)
     negative = np.argwhere(expvals < -0.99)
     if len(negative) == 0:
         return False, '', x
@@ -174,6 +186,6 @@ def find_fixed_angles(
     """
 
     x_shifted = x + np.pi * np.eye(vqa.num_parameters)
-    expvals = jax.vmap(lambda xi: vqa.expval(pauli, xi))(x_shifted)
+    expvals = jax.vmap(lambda xi: vqa._expval_func(pauli, xi))(x_shifted)
 
     return np.argwhere(expvals > 0.99).squeeze()
