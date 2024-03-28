@@ -8,10 +8,6 @@ dev = qml.device('lightning.qubit', wires=num_qubits)
 @qml.qnode(dev)
 def circuit(x):
 
-    # for i in range(len(x)):
-    #     w = i % num_qubits
-    #     qml.RX(x[i], wires=w)
-
     def loop_fn(i, w):
         qml.RX(x[i], wires=w)
         return i % num_qubits

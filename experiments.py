@@ -150,7 +150,7 @@ def find_nonzero_pauli(
     y = vqa.random_clifford_parameters(num_samples, rng)
     if len(i_fixed):
         y[:, i_fixed] = x[i_fixed]
-    expvals = jax.vmap(lambda xi: vqa.expval(paulis, xi))(y)
+    expvals = jax.vmap(vqa.expval(paulis))(y)
     negative = np.argwhere(expvals < -0.99)
     if len(negative) == 0:
         return False, '', x

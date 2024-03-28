@@ -2,12 +2,32 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
+from qiskit.quantum_info import Statevector, Pauli
+
 # from catalyst import qjit, for_loop
 
 from pauli import random_local_two_body_pauli, all_two_body_pauli
 from traps import LocalVQA
 
 import pennylane as qml
+
+
+def test_expvals():
+    num_qubits = 4
+    num_layers = 5
+
+    vqa = LocalVQA(num_qubits, num_layers)
+    paulis = all_two_body_pauli(num_qubits)
+
+    x = vqa.random_parameters()
+
+    qs_circuit = vqa.qiskit_circuit.assign_parameters(vqa._params_dict(x))
+    state = Statevector(qs_circuit)
+    qs_exp = [state.expectation_value(Pauli(p[::-1])) for p in paulis]
+    penny_exp = vqa.expval(paulis)(x)
+
+    assert np.allclose(qs_exp, penny_exp)
+
 
 def test_penny_circuit():
 
@@ -35,8 +55,8 @@ def test_penny_circuit():
     observables = tuple(all_two_body_pauli(num_qubits))
     x = vqa.random_parameters()
 
-    e0 = expval(observables[:1], circ0, x)
-    e1 = expval(observables[:1], circ1, x)
+    e0 = expval(observables, circ0, x)
+    e1 = expval(observables, circ1, x)
 
     assert np.allclose(e0, e1, atol=1e-5, rtol=1e-5)
 
