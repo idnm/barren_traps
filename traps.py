@@ -129,7 +129,7 @@ class LocalVQA:
 
         @qml.qjit
         def expectation(mat, x) -> np.ndarray:
-            print('compiling')
+            print('\n', '>'*10+'compiling'+'<'*10)
             state = circ(x)
             return (state.conj() * (mat @ state)).sum()
 
@@ -145,7 +145,7 @@ class LocalVQA:
         observables = [qml.pauli.string_to_pauli_word(pauli) for pauli in paulis]
         matrices = jnp.asarray([qml.matrix(obs, wire_order=range(self.num_qubits)) for obs in observables])
 
-        return lambda x: jax.vmap(lambda m: self._expval_func(m, x))(matrices)
+        return lambda x: jnp.real(jax.vmap(lambda m: self._expval_func(m, x))(matrices))
     @staticmethod
     def _init_rng(rng: Union[np.random.Generator, int, None]) -> np.random.Generator:
         if isinstance(rng, int):
@@ -162,11 +162,14 @@ class LocalVQA:
         sample_variance = values.var(axis=0)
         return sample_variance
 
+    def clifford_samples(self, paulis: Sequence[str], num_samples, rng):
+        x = np.pi / 2 * rng.choice(range(4), size=(num_samples, self.num_parameters), replace=True)
+        values = jax.vmap(self.expval(paulis))(x)
+        return values
+
     def clifford_variance(self, paulis: Sequence[str], num_samples=50, rng: Union[np.random.Generator, int, None] = None):
         rng = self._init_rng(rng)
-        x = np.pi / 2 * rng.choice(range(4), size=(num_samples, self.num_parameters), replace=True)
-
-        values = jax.vmap(self.expval(paulis))(x)
+        values = self.clifford_samples(paulis, num_samples, rng)
         sample_variance = values.var(axis=0)
         return sample_variance
 

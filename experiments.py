@@ -13,26 +13,21 @@ from traps import LocalVQA
 
 
 class Experiment:
-    def __init__(self, name: str, results: dict | None = None, aux: dict | None = None):
+    def __init__(self, name: str, results: dict | None = None):
         self.name = name
-        if results is None:
-            self.results = defaultdict(dict)
-        else:
-            self.results = results
-        self.aux = aux
+        self.results = results
 
     def run(self):
         pass
 
-    def plot_results(self, marker='o'):
+    @staticmethod
+    def _plot_results(results, marker='o'):
         cmap = plt.colormaps['viridis']
-
-        variances = self.results
-        qubits = sorted(list(variances.keys()))
+        qubits = sorted(list(results.keys()))
 
         for n in qubits:
-            layers = list(variances[n].keys())
-            mean_variances = [variances[n][l].mean() for l in layers]  # Average over different observables
+            layers = list(results[n].keys())
+            mean_variances = [results[n][l].mean() for l in layers]  # Average over different observables
 
             color = cmap(n / max(qubits))
             plt.scatter(layers, mean_variances, marker=marker, color=color)
@@ -42,43 +37,71 @@ class Experiment:
         plt.ylabel('Sample variance')
         plt.yscale('log', base=2)
 
-        plt.title(self.name)
-
 
     def save(self, path='results'):
         with open(path+'/'+self.name, 'wb') as f:
-            pickle.dump([self.results, self.aux], f)
+            pickle.dump(self.results, f)
 
     @classmethod
     def load(cls, name: str, path='results'):
         with open(path+'/'+name, 'rb') as f:
-            results, aux = pickle.load(f)
-            exp = cls(name=name, results=results, aux=aux)
+            results = pickle.load(f)
+            exp = cls(name, results)
             return exp
 
 
 class BPExperiment(Experiment):
-    def __init__(self, name: str, results: dict | None = None, aux: dict | None = None):
-        assert 'method' in aux and aux['method'] in ('uniform', 'clifford')
-        super().__init__(name=name, results=results, aux=aux)
 
+    def __init__(self, name: str, results: dict | None = None):
+        if results is None:
+            results = (defaultdict(dict), defaultdict(dict), defaultdict(dict))
+        super().__init__(name=name, results=results)
 
     def run(self, qubits: Sequence[int], layers: Sequence[int], num_samples: int, seed=42):
         rng = np.random.default_rng(seed)
-        for n in tqdm(qubits):
-            observables = all_two_body_pauli(n)
-            for l in tqdm(layers):
-                vqa = LocalVQA(n, l)
-                if self.aux['method'] == 'uniform':
-                    var_function = vqa.uniform_variance
-                elif self.aux['method'] == 'clifford':
-                    var_function = vqa.clifford_variance
 
-                vars = var_function(observables, num_samples=num_samples,
-                                            rng=rng)  # (num_samples, num_observables)
-                self.results[n][l] = vars
+        results_uniform, results_clifford, results_clifford_plus = self.results
+        for num_qubits in tqdm(qubits):
+            observables = all_two_body_pauli(num_qubits)
+            for num_layers in tqdm(layers):
+                vqa = LocalVQA(num_qubits, num_layers)
+
+                # Uniform variance
+                uniform_vars = vqa.uniform_variance(observables, num_samples=num_samples, rng=rng)
+                results_uniform[num_qubits][num_layers] = uniform_vars
+
+                # Clifford variance
+                clifford_values = vqa.clifford_samples(observables, num_samples=num_samples, rng=rng)  # (num_samples, num_observables)
+                clifford_vars = clifford_values.var(axis=0)
+                results_clifford[num_qubits][num_layers] = clifford_vars
+
+                # Clifford variance conditioned on the presence of non-zero paulis
+
+                # Remove clifford points where all Paulis are zero
+                cond_clifford_values = clifford_values[np.any(np.abs(clifford_values) > 0.5, axis=1)]
+
+                # Before computing variances, one Pauli observable with non-zero exp value needs to be excluded.
+                # Otherwise, we get biased results.
+                # Simplest way to do this is to sort, and remove the last column (should be all ones)
+                # Sorting does not affect the variance.
+
+                i_sort = np.argsort(np.abs(cond_clifford_values), axis=1)
+                cond_clifford_values = np.take_along_axis(cond_clifford_values, i_sort, axis=1)
+
+                assert np.all(np.abs(cond_clifford_values[:, -1]) > 0.5) # check that the last column has no zeros.
+                cond_clifford_values = cond_clifford_values[:, :-1]
+
+                cond_clifford_vars = cond_clifford_values.var(axis=0)
+                results_clifford_plus[num_qubits][num_layers] = cond_clifford_vars
+
                 self.save()
 
+    def plot_results(self):
+
+        result_types = ('uniform', 'clifford', 'clifford+')
+        markers = ('o', '^', '+')
+        for result_type, marker, result in zip(result_types, markers, self.results):
+            self._plot_results(result, marker)
 
 @dataclass
 class ShallowingExperiment(Experiment):
@@ -114,7 +137,7 @@ class ShallowingExperiment(Experiment):
             self.results[num_fixed] = np.asarray(values).reshape(num_clifford_points * len(observables), num_samples)
             self.save()
 
-    def plot_results(self, marker='o', num_qubits: int = 0):
+    def _plot_results(self, marker='o', num_qubits: int = 0):
         expvals = self.results
         fixed = sorted(list(expvals.keys()))
 
@@ -162,7 +185,7 @@ def find_nonzero_pauli(
     y = vqa.random_clifford_parameters(num_samples, rng)
     if len(i_fixed):
         y[:, i_fixed] = x[i_fixed]
-    expvals = jax.vmap(vqa._expval_func(paulis))(y)
+    expvals = jax.vmap(vqa.expval(paulis))(y)
     negative = np.argwhere(expvals < -0.99)
     if len(negative) == 0:
         return False, '', x
@@ -173,7 +196,7 @@ def find_nonzero_pauli(
     return True, paulis[j], y[i]
 
 
-def find_fixed_angles(
+def find_indices_of_fixed_angles(
         vqa: LocalVQA,
         pauli: str,
         x: np.ndarray
@@ -182,10 +205,10 @@ def find_fixed_angles(
     """Find which angles at a clifford point are fixed.
     Assumes that vqa(pauli, x) = -1.
 
-    Based on a simple observation that shifting any fixed angle changes the sign of the expectation.
+    Based on a simple observation that shifting any fixed angle by pi changes the sign of the expectation.
     """
 
     x_shifted = x + np.pi * np.eye(vqa.num_parameters)
-    expvals = jax.vmap(lambda xi: vqa._expval_func(pauli, xi))(x_shifted)
+    expvals = jax.vmap(vqa.expval([pauli]))(x_shifted)[:, 0]
 
     return np.argwhere(expvals > 0.99).squeeze()
