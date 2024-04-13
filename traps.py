@@ -116,7 +116,8 @@ class LocalVQA:
                 qml.RX(x[l, n], wires=n)
                 qml.RZ(z[l, n], wires=n)
 
-        qml.for_loop(0, self.num_layers, 1)(entangling_layer)()
+        if self.num_layers > 0:
+            qml.for_loop(0, self.num_layers, 1)(entangling_layer)()
 
     @cached_property
     def _expval_func(self) -> Callable: #, pauli_strings: Sequence[str]) -> Callable[[np.ndarray], np.ndarray]:

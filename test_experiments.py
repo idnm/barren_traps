@@ -3,9 +3,45 @@ import jaxopt
 import numpy as np
 import optax
 
-from experiments import find_nonzero_pauli, find_indices_of_fixed_angles, BPExperiment
+from experiments import BPExperiment, ExactMinExperiment
 from pauli import all_two_body_pauli
 from traps import LocalVQA
+
+
+def test_exact_min_experiment():
+
+    exp = ExactMinExperiment('test')
+
+    qubits = (2,)
+    layers = (4, )
+    exp.run(qubits, layers)
+
+
+def test_grads():
+    vqa = LocalVQA(2, 0)
+
+    # ┌────────┐┌────────┐
+    # q_0: ┤ Rx(x0) ├┤ Rz(z0) ├
+    # ├────────┤├────────┤
+    # q_1: ┤ Rx(x1) ├┤ Rz(z1) ├
+    # └────────┘└────────┘
+
+    paulis = ['II', 'ZZ']
+
+    x = np.array([0., 0., 0., 0.]) # x0, x1, z0, z1
+    i_fixed = np.array([0, 1]) # fix x0 and x1
+    num_test_uniform_points = 5
+    rng = np.random.default_rng(42)
+
+    exp = ExactMinExperiment('test')
+    values = exp._gradient_values(vqa, paulis, x, i_fixed, num_test_uniform_points, rng)
+
+    # print(values.shape)
+    #
+    # print('mean \n', values.mean(axis=0))
+    # print('std \n', values.std(axis=0))
+    # print(values)
+
 
 
 def test_exp():
@@ -52,14 +88,14 @@ def test_free_angles_consistency():
 
     print('\n')
     print('defined vqa')
-    success, pauli, x = find_nonzero_pauli(
+    pauli, x = ExactMinExperiment.find_nonzero_pauli(
         vqa,
         paulis,
         [],
         [],
         rng)
     print('found nonzero')
-    i_fixed = find_indices_of_fixed_angles(vqa, pauli, x)
+    i_fixed = ExactMinExperiment.find_indices_of_fixed_angles(vqa, pauli, x)
 
     print('found fixed')
     y = vqa.random_parameters(num_samples=50, rng=rng)
@@ -69,7 +105,6 @@ def test_free_angles_consistency():
     print('evaluated values')
     assert np.allclose(values, -1, atol=1e-5, rtol=1e-5)
 
-test_free_angles_consistency()
 
 def test_full_opt():
     rng = np.random.default_rng(42)
