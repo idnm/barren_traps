@@ -128,6 +128,7 @@ class ExactMinExperiment(Experiment):
             num_test_clifford_points: int = 10,
             num_test_uniform_points: int = 10,
             max_grads: int = 100,
+            max_obs: int = 100,
             seed: int = 42):
 
         """
@@ -145,6 +146,7 @@ class ExactMinExperiment(Experiment):
         num_test_clifford_points: how many clifford points to try to find the next non-zero Pauli.
         num_test_uniform_points: how many uniform points to sample to check if the loss is exactly zero.
         max_grads: only take derivatives w.r.t. to this number of fixed_angles. Otherwise, deep circuits become too costly.
+        max_obs: likewise, the amount of possible observables becomes too large and needs to be limited.
         """
 
         rng = np.random.default_rng(seed)
@@ -159,6 +161,7 @@ class ExactMinExperiment(Experiment):
                         num_test_clifford_points,
                         num_test_uniform_points,
                         max_grads,
+                        max_obs,
                         rng)
 
                     self.results[num_qubits][num_layers]['paulis'].append(nonzero_paulis)
@@ -171,6 +174,7 @@ class ExactMinExperiment(Experiment):
              num_test_clifford_points: int,
              num_test_uniform_points: int,
              max_grads: int,
+             max_obs: int,
              rng: np.random.Generator
             ) -> Tuple[Sequence[str], float]:
         """
@@ -179,6 +183,9 @@ class ExactMinExperiment(Experiment):
 
         fixed_paulis, x, i_fixed = self.propose_exact_minimum(vqa, observables, num_test_clifford_points, rng)
         remaining_paulis = list(set(observables) - set(fixed_paulis))
+
+        if len(remaining_paulis) > max_obs:
+            remaining_paulis = rng.choice(remaining_paulis, size=max_obs, replace=False)
 
         nonzero_grad_rate = self.nonzero_gradient_rate(
             vqa,
