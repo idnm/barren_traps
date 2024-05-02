@@ -1,19 +1,21 @@
+import itertools
 import pickle
 from collections import defaultdict
-from dataclasses import dataclass
 from functools import partial
-from typing import Union, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import jax
 import numpy as np
 from matplotlib import pyplot as plt
 from tqdm.auto import tqdm
 
-from pauli import all_local_two_body_pauli, all_two_body_pauli
+from pauli import pauli_batch
 from traps import LocalVQA
 
 
 class Experiment:
+    """Base class for experiments providing saving, loading, and plotting methods."""
+
     def __init__(self, name: str, results: dict | None = None):
         self.name = name
         self.results = results
@@ -53,31 +55,43 @@ class Experiment:
 class BPExperiment(Experiment):
 
     def __init__(self, name: str, results: dict | None = None):
+        # Results for this experiment consists of three separate statistics:
+        # over uniform distribution, clifford points, and clifford points conditioned on existence of non-zero Pauli.
         if results is None:
             results = (defaultdict(dict), defaultdict(dict), defaultdict(dict))
         super().__init__(name=name, results=results)
 
-    def run(self, qubits: Sequence[int], layers: Sequence[int], num_samples: int, seed=42):
+    def run(self, qubits: Sequence[int], layers: Sequence[int], num_paulis: int, num_samples: int, seed=42):
+        """
+        qubits: a sequence of circuit sizes to run the experiment on
+        layers: a sequence of depths to run the experiment on
+        num_paulis: how many pauli observables to include for each (num_qubits, num_layers) pair.
+        num_samples: how many points (uniform of clifford) to sample for each (num_qubits, num_layers) pair.
+        """
         rng = np.random.default_rng(seed)
 
         results_uniform, results_clifford, results_clifford_plus = self.results
         for num_qubits in tqdm(qubits):
-            observables = all_two_body_pauli(num_qubits)
+            observables = pauli_batch(num_qubits, num_paulis, max_weight=4, seed=rng)
             for num_layers in tqdm(layers):
                 vqa = LocalVQA(num_qubits, num_layers)
 
                 # Uniform variance
-                uniform_vars = vqa.uniform_variance(observables, num_samples=num_samples, rng=rng)
+                x_uniform = 2 * np.pi * rng.uniform(size=(num_samples, vqa.num_parameters))
+                uniform_values = jax.vmap(vqa.expval(observables))(x_uniform)  # (num_samples, num_observables)
+                uniform_vars = uniform_values.var(axis=0)
                 results_uniform[num_qubits][num_layers] = uniform_vars
 
                 # Clifford variance
-                clifford_values = vqa.clifford_samples(observables, num_samples=num_samples, rng=rng)  # (num_samples, num_observables)
+                x_clifford = np.pi / 2 * rng.choice(range(4), size=(num_samples, vqa.num_parameters), replace=True)
+                clifford_values = jax.vmap(vqa(observables))(x_clifford) # (num_samples, num_observables)
                 clifford_vars = clifford_values.var(axis=0)
                 results_clifford[num_qubits][num_layers] = clifford_vars
 
                 # Clifford variance conditioned on the presence of non-zero paulis
 
                 # Remove clifford points where all Paulis are zero
+                # (0.5 is an arbitrary numeric cutoff (all values are either near 0 or near +-1 )
                 cond_clifford_values = clifford_values[np.any(np.abs(clifford_values) > 0.5, axis=1)]
 
                 # Before computing variances, one Pauli observable with non-zero exp value needs to be excluded.
@@ -97,7 +111,6 @@ class BPExperiment(Experiment):
                 self.save()
 
     def plot_results(self):
-
         result_types = ('uniform', 'clifford', 'clifford+')
         markers = ('o', '^', '+')
         for result_type, marker, result in zip(result_types, markers, self.results):
@@ -153,7 +166,7 @@ class ExactMinExperiment(Experiment):
         for num_qubits in tqdm(qubits):
             for num_layers in tqdm(layers):
                 vqa = LocalVQA(num_qubits, num_layers)
-                observables = all_two_body_pauli(num_qubits)
+                observables = pauli_batch(num_qubits)
                 for _ in tqdm(range(num_samples_per_circuit)):
                     nonzero_paulis, nonzero_grad_rate = self._run(
                         vqa,
@@ -168,6 +181,8 @@ class ExactMinExperiment(Experiment):
                     self.results[num_qubits][num_layers]['rates'].append(nonzero_grad_rate)
                     self.save()
 
+                    jax.clear_caches()
+
     def _run(self,
              vqa: LocalVQA,
              observables: Sequence[str],
@@ -181,12 +196,15 @@ class ExactMinExperiment(Experiment):
         Compute the proportion of non-zero values/gradients for a given circuit.
         """
 
+        print('\n Looking for exact minimum')
         fixed_paulis, x, i_fixed = self.propose_exact_minimum(vqa, observables, num_test_clifford_points, rng)
         remaining_paulis = list(set(observables) - set(fixed_paulis))
 
+        # assert (len(all_two_body_pauli(vqa.num_qubits)) - len(fixed_paulis)) == len(remaining_paulis)x`
         if len(remaining_paulis) > max_obs:
             remaining_paulis = rng.choice(remaining_paulis, size=max_obs, replace=False)
 
+        print('\n Computing rates')
         nonzero_grad_rate = self.nonzero_gradient_rate(
             vqa,
             remaining_paulis,
@@ -196,6 +214,7 @@ class ExactMinExperiment(Experiment):
             max_grads,
             rng
         )
+        # print(f'\n rate {nonzero_grad_rate}')
 
         return fixed_paulis, nonzero_grad_rate
 
@@ -224,12 +243,15 @@ class ExactMinExperiment(Experiment):
         x = np.zeros(vqa.num_parameters)
         i_fixed = np.array([], dtype=int)
 
-
         nonzero_paulis = []
         while True:
-            pauli, x = self.find_nonzero_pauli(vqa, observables, x, i_fixed, num_test_clifford_points, rng)
-
-            if not pauli:
+            rng.shuffle(observables)
+            batch_size = max(len(observables) // 10, 10)
+            for observables_batch in itertools.batched(observables, batch_size):
+                pauli, x = self.find_nonzero_pauli(vqa, observables_batch, x, i_fixed, num_test_clifford_points, rng)
+                if pauli:
+                    break
+            else:
                 break
             
             # indices of fixed_angles w.r.t. to the newly added Pauli
@@ -239,6 +261,7 @@ class ExactMinExperiment(Experiment):
             
             observables.remove(pauli)
             nonzero_paulis.append(pauli)
+            print(f'paulis {nonzero_paulis}, len(i_fixed) {len(i_fixed)}({vqa.num_parameters})')
 
         return nonzero_paulis, x, i_fixed
 
@@ -282,6 +305,7 @@ class ExactMinExperiment(Experiment):
         shifts = shifts[random_subset]
 
         # Zero shift to probe the value of the function as well.
+
         shifts = np.vstack([np.zeros(vqa.num_parameters), shifts])
 
         # Array of angles probing both, gradients in the direction of fixed angles, and random values
@@ -306,8 +330,20 @@ class ExactMinExperiment(Experiment):
         values = self._gradient_values(vqa, paulis, x, i_fixed, num_test_uniform_points, max_grads, rng)
 
         # Select pairs (gradient, observable) which have zero values (within machine precision) at all sampled points.
-        all_nonzero = np.all(np.abs(values) > 1e-6, axis=0)
+        all_nonzero = np.all(np.abs(values) > 1e-5, axis=0)
         rate = np.count_nonzero(all_nonzero) / all_nonzero.size
+
+        vars = values.var(axis=0)
+        vars_rate = np.count_nonzero(vars > 1e-5) / vars.size
+
+        values_values = values[:, 0, :]
+
+        values_values_rate = np.count_nonzero(np.abs(values_values) > 0.5) / values_values.size
+
+        vars_values = values_values.var(axis=0)
+        vars_values_rate = np.count_nonzero(vars_values > 1e-5) / vars_values.size
+
+        print(f'rate {rate}, values rate {values_values_rate}, vars rate {vars_rate}, vars (values) rate {vars_values_rate}')
 
         return rate
 
@@ -331,13 +367,16 @@ class ExactMinExperiment(Experiment):
         y = vqa.random_clifford_parameters(num_samples, rng)
         if len(i_fixed):
             y[:, i_fixed] = x[i_fixed]
-        expvals = jax.vmap(vqa.expval(paulis))(y)
+        expvals = jax.vmap(vqa.expval(paulis))(y)  # (num_samples, num_paulis)
         negative = np.argwhere(expvals < -0.99)
         if len(negative) == 0:
             return '', x
 
-        # Index of a random negative expectation value
-        i, j = rng.choice(negative)
+        # Indices of all angles with non-zero observables.
+        # Choosing only from unique ones should remove the bias towards shallower circuits.
+        i_unique = np.unique(negative[:, 0])
+        i = rng.choice(i_unique)
+        i, j = rng.choice(negative[negative[:, 0] == i])
 
         return paulis[j], y[i]
 
