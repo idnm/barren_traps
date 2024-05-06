@@ -170,7 +170,7 @@ class ExactMinExperiment(Experiment):
                 if num_test_clifford_points is None:
                     num_test_clifford_points = int(30 * 2 ** num_qubits / len(observables))
                 if max_grads is None:
-                    max_grads = int(10 * 2 ** num_qubits / len(observables))
+                    max_grads = int(30 * 2 ** num_qubits / len(observables))
 
                 for _ in tqdm(range(num_samples_per_circuit)):
                     pauli_terms = PauliTerms(observables)

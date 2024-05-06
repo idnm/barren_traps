@@ -130,7 +130,7 @@ class LocalVQA:
 
         @qml.qjit
         def expectation(mat, x) -> np.ndarray:
-            print('\n', '>'*10+'compiling'+'<'*10)
+            # print('\n', '>'*10+'compiling'+'<'*10)
             state = circ(x)
             return (state.conj() * (mat @ state)).sum()
 

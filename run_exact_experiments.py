@@ -4,7 +4,7 @@ qubits = list(range(2, 10+1, 2))
 layers = (50, ) * len(qubits)
 
 
-exp_exact = ExactMinExperiment('main')
+exp_exact = ExactMinExperiment('exact_exp')
 exp_exact.run(
     qubits,
     layers,
