@@ -186,6 +186,10 @@ class ExactMinExperiment(Experiment):
                     self.results[num_qubits][num_layers]['rates'].append(nonzero_grad_rate)
                     self.save()
 
+                    jax.clear_caches()
+
+
+
     def single_run(self,
                    vqa: LocalVQA,
                    pauli_terms: PauliTerms,
