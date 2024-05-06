@@ -9,7 +9,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 from tqdm.auto import tqdm
 
-from pauli import pauli_batch
+from pauli import pauli_batch, all_local_two_body_pauli, all_one_body_pauli, all_independent_local_two_body_pauli, \
+    all_independent_two_body_pauli, PauliTerms, all_two_body_pauli
 from traps import LocalVQA
 
 
@@ -72,7 +73,7 @@ class BPExperiment(Experiment):
 
         results_uniform, results_clifford, results_clifford_plus = self.results
         for num_qubits in tqdm(qubits):
-            observables = pauli_batch(num_qubits, num_paulis, max_weight=4, seed=rng)
+            observables = all_local_two_body_pauli(num_qubits)
             for num_layers in tqdm(layers):
                 vqa = LocalVQA(num_qubits, num_layers)
 
@@ -84,7 +85,7 @@ class BPExperiment(Experiment):
 
                 # Clifford variance
                 x_clifford = np.pi / 2 * rng.choice(range(4), size=(num_samples, vqa.num_parameters), replace=True)
-                clifford_values = jax.vmap(vqa(observables))(x_clifford) # (num_samples, num_observables)
+                clifford_values = jax.vmap(vqa.expval(observables))(x_clifford) # (num_samples, num_observables)
                 clifford_vars = clifford_values.var(axis=0)
                 results_clifford[num_qubits][num_layers] = clifford_vars
 
@@ -120,7 +121,7 @@ class BPExperiment(Experiment):
 class ExactMinExperiment(Experiment):
     """
     Experiment that attempts to find an exact local minimum of a VQA.
-    First it greedily looks for a number of Pauli operators that can be simultaneously minimized.
+    First it greedily looks for a bunch of Pauli operators that can be simultaneously minimized.
     This results in a split (fixed_angles, free_angles).
 
     Then it tests how likely is that a new, unrelated Pauli op, has loss function identically zero as a function of free_angles.
@@ -138,20 +139,19 @@ class ExactMinExperiment(Experiment):
             qubits: Sequence[int],
             layers: Sequence[int],
             num_samples_per_circuit: int = 10,
-            num_test_clifford_points: int = 10,
             num_test_uniform_points: int = 10,
-            max_grads: int = 100,
-            max_obs: int = 100,
+            num_test_clifford_points: int | None = None,
+            max_grads: int | None = None,
+            # max_obs: int | None = None,
             seed: int = 42):
 
         """
-        For each circuit specified by num_qubits from qubits, and num_layers from layers construct a VQA.
+        For each circuit specified by `num_qubits` from `qubits`, and `num_layers` from `layers` construct a VQA.
         Then propose an exact local minimum for this VQA, by greedily adding Pauli operators that can be
-        simultaneously minimized.
-        Pauli operators are taken from all possible two-body operators, not necessarily local.
+        simultaneously minimized. Pauli's operators are under weight=4 are samples randomly.
 
         Find a split (fixed_angles, free_angles) corresponding to the proposed exact minimum.
-        Finally, to access whether a given point is likely be an exact local minimum, gauge how likely is a generic
+        Finally, access whether a given point is likely be an exact local minimum, to gauge how likely is a generic
         Pauli op to have loss function identically zero w.r.t. free_angles, as well as identically zero derivatives
         w.r.t. fixed_angles.
 
@@ -163,67 +163,63 @@ class ExactMinExperiment(Experiment):
         """
 
         rng = np.random.default_rng(seed)
-        for num_qubits in tqdm(qubits):
-            for num_layers in tqdm(layers):
+        for num_qubits, num_layers in tqdm(zip(qubits, layers)):
                 vqa = LocalVQA(num_qubits, num_layers)
-                observables = pauli_batch(num_qubits)
+                observables = all_two_body_pauli(num_qubits)
+
+                if num_test_clifford_points is None:
+                    num_test_clifford_points = int(30 * 2 ** num_qubits / len(observables))
+                if max_grads is None:
+                    max_grads = int(10 * 2 ** num_qubits / len(observables))
+
                 for _ in tqdm(range(num_samples_per_circuit)):
-                    nonzero_paulis, nonzero_grad_rate = self._run(
+                    pauli_terms = PauliTerms(observables)
+                    nonzero_grad_rate = self.single_run(
                         vqa,
-                        observables,
+                        pauli_terms,
                         num_test_clifford_points,
                         num_test_uniform_points,
                         max_grads,
-                        max_obs,
                         rng)
 
-                    self.results[num_qubits][num_layers]['paulis'].append(nonzero_paulis)
+                    self.results[num_qubits][num_layers]['paulis'].append(pauli_terms)
                     self.results[num_qubits][num_layers]['rates'].append(nonzero_grad_rate)
                     self.save()
 
-                    jax.clear_caches()
-
-    def _run(self,
-             vqa: LocalVQA,
-             observables: Sequence[str],
-             num_test_clifford_points: int,
-             num_test_uniform_points: int,
-             max_grads: int,
-             max_obs: int,
-             rng: np.random.Generator
-            ) -> Tuple[Sequence[str], float]:
+    def single_run(self,
+                   vqa: LocalVQA,
+                   pauli_terms: PauliTerms,
+                   num_test_clifford_points: int,
+                   num_test_uniform_points: int,
+                   max_grads: int,
+                   rng: np.random.Generator
+                   ) -> float:
         """
-        Compute the proportion of non-zero values/gradients for a given circuit.
+        Propose an exact minimum and compute the proportion of non-zero values/gradients for a given circuit.
         """
 
         print('\n Looking for exact minimum')
-        fixed_paulis, x, i_fixed = self.propose_exact_minimum(vqa, observables, num_test_clifford_points, rng)
-        remaining_paulis = list(set(observables) - set(fixed_paulis))
-
-        # assert (len(all_two_body_pauli(vqa.num_qubits)) - len(fixed_paulis)) == len(remaining_paulis)x`
-        if len(remaining_paulis) > max_obs:
-            remaining_paulis = rng.choice(remaining_paulis, size=max_obs, replace=False)
+        x, i_fixed = self.propose_exact_minimum(vqa, pauli_terms, num_test_clifford_points, rng)
 
         print('\n Computing rates')
         nonzero_grad_rate = self.nonzero_gradient_rate(
             vqa,
-            remaining_paulis,
+            pauli_terms.remaining_paulis,
             x,
             i_fixed,
             num_test_uniform_points,
             max_grads,
             rng
         )
-        # print(f'\n rate {nonzero_grad_rate}')
 
-        return fixed_paulis, nonzero_grad_rate
+        return nonzero_grad_rate
 
+    @staticmethod
     def propose_exact_minimum(
-            self,
             vqa: LocalVQA,
-            observables: Sequence[str],
+            pauli_terms: PauliTerms,
             num_test_clifford_points: int,
-            rng: np.random.Generator) -> Tuple[Sequence[str], np.ndarray, np.ndarray]:
+            rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
 
         """Proposes an exact minimum by greedily finding a subset of observables that are
         simultaneously minimized at some Clifford point.
@@ -236,34 +232,36 @@ class ExactMinExperiment(Experiment):
         Stop when no Pauli operators have expectation value -1 at the samples Clifford points.
         """
 
-        observables = observables.copy()
+        # observables = observables.copy()
         
-        # Initialize all angles to 0, and indices of the fixed_angle to an empty array.
+        # Initialize all angles to 0, and indices of the fixed_angles to an empty array.
         # Later, x[i_fixed] are the values of fixed_angles, the rest are free_angles.
         x = np.zeros(vqa.num_parameters)
         i_fixed = np.array([], dtype=int)
 
-        nonzero_paulis = []
         while True:
-            rng.shuffle(observables)
-            batch_size = max(len(observables) // 10, 10)
-            for observables_batch in itertools.batched(observables, batch_size):
-                pauli, x = self.find_nonzero_pauli(vqa, observables_batch, x, i_fixed, num_test_clifford_points, rng)
+            # For efficiency, batch observables while looking for the next non-zero paulis.
+            batch_size = 50
+            candidate_paulis = pauli_terms.remaining_paulis.copy()
+            rng.shuffle(candidate_paulis)
+            for paulis in [candidate_paulis[i:i+batch_size] for i in range(0, len(candidate_paulis), batch_size)]:
+                pauli, x = ExactMinExperiment.find_nonzero_pauli(vqa, paulis, x, i_fixed, num_test_clifford_points, rng)
                 if pauli:
                     break
             else:
                 break
-            
+
             # indices of fixed_angles w.r.t. to the newly added Pauli
-            new_fixed = self.find_indices_of_fixed_angles(vqa, pauli, x)
+            new_fixed = ExactMinExperiment.find_indices_of_fixed_angles(vqa, pauli, x)
             # indices of fixed_angles w.r.t. to all of the non-zero Pauli
             i_fixed = np.unique(np.concatenate([i_fixed, new_fixed]))
-            
-            observables.remove(pauli)
-            nonzero_paulis.append(pauli)
-            print(f'paulis {nonzero_paulis}, len(i_fixed) {len(i_fixed)}({vqa.num_parameters})')
 
-        return nonzero_paulis, x, i_fixed
+            pauli_terms.add_fixed_pauli(pauli)
+            # observables.remove(pauli)
+            # nonzero_paulis.append(pauli)
+            print(f'paulis {pauli_terms.fixed_paulis}, len(i_fixed) {len(i_fixed)}({vqa.num_parameters})')
+
+        return x, i_fixed
 
     @staticmethod
     def _gradient_values(
@@ -280,12 +278,12 @@ class ExactMinExperiment(Experiment):
 
         We want to test whether expvals of the Pauli operators at fixed_angles, as well as their derivatives
         w.r.t. fixed_angles, depend on free_angles.
-        For this, for each configuration (pauli, derivative w.r.t. a fixed_angle) we sample from free_angles uniformly.
+        To test this, for each configuration (pauli, derivative w.r.t. a fixed_angle) we sample from free_angles uniformly.
         The expectation is that the resulting values are zero within machine precision when the loss functions
         (and their gradients) are identically vanishing.
 
         Note that `gradient values` also include the value of the function itself.
-        Also, we do not actually compute the gradients. These are given by d L = L(+pi/2) - L(-pi/2). Instead,
+        Also, we do not actually compute the gradients. These are given by dL = L(+pi/2) - L(-pi/2). Instead,
         we only compute L(pi/2). These 'half-gradients' being zero is sufficient for the full gradient to be zero.
 
         """
@@ -299,18 +297,17 @@ class ExactMinExperiment(Experiment):
         # (max_grads + 1, num_angles)
         shifts = np.pi / 2 * np.eye(vqa.num_parameters)
         shifts = shifts[i_fixed] # only take gradients (shifts) in the directions of fixed_angles
-        # For deep circuits, there are too many angles. So only take the derivatives wrt to a max_grads number of them.
+        # For deep circuits, there are too many angles. So only take the derivatives wrt to `max_grads` number of them.
         num_grads = min(max_grads, len(shifts))
         random_subset = rng.choice(np.arange(len(shifts)), size=num_grads, replace=False)
         shifts = shifts[random_subset]
 
-        # Zero shift to probe the value of the function as well.
-
+        # Add zero shift to probe the value of the function as well.
         shifts = np.vstack([np.zeros(vqa.num_parameters), shifts])
 
         # Array of angles probing both, gradients in the direction of fixed angles, and random values
         # in the direction of free angles.
-        # (num_uniform_samples, num_fixed_angles + 1, num_angles)
+        # (num_uniform_samples, num_grads + 1, num_angles)
 
         x_grad = x_rnd.reshape(num_test_uniform_points, 1, vqa.num_parameters) + shifts
 
@@ -326,7 +323,14 @@ class ExactMinExperiment(Experiment):
             max_grads: int,
             rng: np.random.Generator
     ) -> float:
+        """
+        We are given a candidate local minimum defined by (x, i_fixed).
+        We want to check how often other Pauli operators and their gradients (w.r.t. to the fixed angles) are
+        exactly zero.
 
+        num_test_uniform_points: how many uniform points to sample to decide that the function is exactly zero.
+        max_grads: maximum number of grad component to consider.
+        """
         values = self._gradient_values(vqa, paulis, x, i_fixed, num_test_uniform_points, max_grads, rng)
 
         # Select pairs (gradient, observable) which have zero values (within machine precision) at all sampled points.
@@ -358,7 +362,7 @@ class ExactMinExperiment(Experiment):
     ) -> Tuple[str, np.ndarray]:
         """
         Try finding a pauli string from the given list, which has a non-zero expectation value, subject to constraints.
-        The constraints are that angles indexed by i_fixed are fixed to valued x_fixed.
+        The constraints are that angles indexed by i_fixed are fixed to valued x[i_fixed].
 
         Apparently, there is no efficient way to do this. An inefficient way is to sample many clifford points and look
         at many observables at once, choosing any one that works.
