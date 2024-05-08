@@ -12,6 +12,8 @@ from tqdm.auto import tqdm
 from pauli import pauli_batch, all_local_two_body_pauli, all_one_body_pauli, all_independent_local_two_body_pauli, \
     all_independent_two_body_pauli, PauliTerms, all_two_body_pauli
 from traps import LocalVQA
+import matplotlib.lines as mlines
+
 
 
 class Experiment:
@@ -25,21 +27,35 @@ class Experiment:
         pass
 
     @staticmethod
-    def _plot_results(results, marker='o'):
+    def _color(num_qubits, max_qubits):
         cmap = plt.colormaps['viridis']
+        return cmap(num_qubits / max_qubits)
+
+    @staticmethod
+    def _plot_lines(qubits):
+        for n in qubits:
+            color = Experiment._color(n, max(qubits))
+            plt.axhline(2 ** -n, color=color, label=f'n={n}')
+
+    @staticmethod
+    def _plot_results(results, marker='o', offset=0.):
         qubits = sorted(list(results.keys()))
 
         for n in qubits:
             layers = list(results[n].keys())
-            mean_variances = [results[n][l].mean() for l in layers]  # Average over different observables
+            mean_variances = np.asarray([results[n][l].mean() for l in layers])  # Average over different observables
+            # mean_variances = mean_variances[mean_variances > 1e-5] # Truncate variances that are too small
 
-            color = cmap(n / max(qubits))
-            plt.scatter(layers, mean_variances, marker=marker, color=color)
-            plt.axhline(2 ** -n, color=color, label=f'n={n}')
+            color = Experiment._color(n, max(qubits))
+            plt.scatter([l+offset for l in layers], mean_variances, marker=marker, color=color, edgecolors='black', alpha=0.7)
+
+        Experiment._plot_lines(qubits)
 
         plt.xlabel('Layers')
         plt.ylabel('Sample variance')
         plt.yscale('log', base=2)
+        plt.ylim(2 ** -(max(qubits) + 0.9), 2 ** -(min(qubits) - 0.9))
+
 
     def save(self, path='results'):
         with open(path+'/'+self.name, 'wb') as f:
@@ -113,9 +129,16 @@ class BPExperiment(Experiment):
 
     def plot_results(self):
         result_types = ('uniform', 'clifford', 'clifford+')
-        markers = ('o', '^', '+')
-        for result_type, marker, result in zip(result_types, markers, self.results):
-            self._plot_results(result, marker)
+        markers = ('o', 's', '^')
+        offsets = (-1, 0., 1)
+        labels = ('Uniform', 'Clifford', 'Conditioned Clifford')
+        handles = []
+        for result_type, marker, result, offset, label in zip(result_types, markers, self.results, offsets, labels):
+            self._plot_results(result, marker, offset=offset)
+            handles.append(mlines.Line2D([], [], marker=marker, markerfacecolor='None', markeredgecolor='black', linestyle='None',
+                                  markersize=10, label=label))
+
+        plt.legend(handles=handles, loc=(0.6, 1.05))
 
 
 class ExactMinExperiment(Experiment):
@@ -405,3 +428,32 @@ class ExactMinExperiment(Experiment):
         expvals = jax.vmap(vqa.expval([pauli]))(x_shifted)[:, 0]
 
         return np.argwhere(expvals > 0.99).squeeze()
+
+    def plot_results(self):
+        results = self.results
+        qubits = sorted(list(results.keys()))
+
+        self._plot_lines(qubits)
+
+        for num_qubits in qubits:
+            num_layers = list(results[num_qubits].keys())[0]
+            rates = np.asarray(results[num_qubits][num_layers]['rates'])
+            rates = rates[rates < 0.9]  # Discards failed runs with no fixed Paulis found
+
+            color = Experiment._color(num_qubits, max(qubits))
+            plt.scatter([num_qubits + 0.1] * len(rates), rates, color=color, marker='o', edgecolors='black', alpha=0.8)
+            plt.scatter([num_qubits - 0.1], rates.mean(), color=color, marker='s', edgecolors='black', s=70)
+
+        handle_samples = mlines.Line2D([], [], marker='o', markeredgecolor='black', markerfacecolor='None', linestyle='None',
+                                  markersize=10, label='Individual samples')
+        handle_average = mlines.Line2D([], [], marker='s', markeredgecolor='black', markerfacecolor='None', linestyle='None',
+                                  markersize=10, label='Sample average')
+
+        plt.ylim(2 ** -(max(qubits)+0.9), 2 ** -(min(qubits) - 0.9))
+        plt.yscale('log', base=2)
+
+        plt.ylabel('Vanishing probability')
+        plt.xlabel('Number of qubits')
+
+        plt.legend(handles=[handle_samples, handle_average], loc=(0.6, 1.05))
+
