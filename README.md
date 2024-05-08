@@ -1,0 +1,1 @@
+Numerical experiments reported in [preprint]. Plots are in notebook `barren_traps`, data was produced by running scripts `run_bp_experiment` and `run_exact_experiments` and stored in folder `results`.
