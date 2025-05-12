@@ -11,9 +11,8 @@ from tqdm.auto import tqdm
 
 from pauli import pauli_batch, all_local_two_body_pauli, all_one_body_pauli, all_independent_local_two_body_pauli, \
     all_independent_two_body_pauli, PauliTerms, all_two_body_pauli
-from traps import LocalVQA
+from traps import HEA
 import matplotlib.lines as mlines
-
 
 
 class Experiment:
@@ -29,7 +28,7 @@ class Experiment:
     @staticmethod
     def _color(num_qubits, max_qubits):
         cmap = plt.colormaps['viridis']
-        return cmap(num_qubits / max_qubits)
+        return cmap(1-num_qubits / max_qubits)
 
     @staticmethod
     def _plot_lines(qubits):
@@ -56,7 +55,6 @@ class Experiment:
         plt.yscale('log', base=2)
         plt.ylim(2 ** -(max(qubits) + 0.9), 2 ** -(min(qubits) - 0.9))
 
-
     def save(self, path='results'):
         with open(path+'/'+self.name, 'wb') as f:
             pickle.dump(self.results, f)
@@ -72,11 +70,35 @@ class Experiment:
 class BPExperiment(Experiment):
 
     def __init__(self, name: str, results: dict | None = None):
-        # Results for this experiment consists of three separate statistics:
-        # over uniform distribution, clifford points, and clifford points conditioned on existence of non-zero Pauli.
+        # Results for this experiment consists of two separate statistics:
+        # over uniform distribution, clifford points
         if results is None:
-            results = (defaultdict(dict), defaultdict(dict), defaultdict(dict))
+            results = {'uniform': defaultdict(dict), 'clifford': defaultdict(dict)}
+
+        self.vars = None
+        self.correlators = None
+
         super().__init__(name=name, results=results)
+
+    @classmethod
+    def load(cls, name: str, path='results'):
+        with open(path+'/'+name, 'rb') as f:
+            results = pickle.load(f)
+            exp = cls(name, results)
+            print('computing vars and correlators')
+            exp.compute_vars_and_correlators()
+            print('done')
+            return exp
+
+    def compute_vars_and_correlators(self):
+        self.vars = {'uniform': defaultdict(dict), 'clifford': defaultdict(dict)}
+        self.correlators = {'uniform': defaultdict(dict), 'clifford': defaultdict(dict)}
+
+        for result_type in ('uniform', 'clifford'):
+            for num_qubits in self.results[result_type].keys():
+                for num_layers in self.results[result_type][num_qubits].keys():
+                    self.vars[result_type][num_qubits][num_layers] = self.results[result_type][num_qubits][num_layers].var()
+                    self.correlators[result_type][num_qubits][num_layers] = BPExperiment.correlator(self.results[result_type][num_qubits][num_layers]).mean()
 
     def run(self, qubits: Sequence[int], layers: Sequence[int], num_paulis: int, num_samples: int, seed=42):
         """
@@ -87,58 +109,80 @@ class BPExperiment(Experiment):
         """
         rng = np.random.default_rng(seed)
 
-        results_uniform, results_clifford, results_clifford_plus = self.results
         for num_qubits in tqdm(qubits):
             observables = all_local_two_body_pauli(num_qubits)
             for num_layers in tqdm(layers):
-                vqa = LocalVQA(num_qubits, num_layers)
+                vqa = HEA(num_qubits, num_layers)
 
                 # Uniform variance
                 x_uniform = 2 * np.pi * rng.uniform(size=(num_samples, vqa.num_parameters))
                 uniform_values = jax.vmap(vqa.expval(observables))(x_uniform)  # (num_samples, num_observables)
-                uniform_vars = uniform_values.var(axis=0)
-                results_uniform[num_qubits][num_layers] = uniform_vars
+
+                self.results['uniform'][num_qubits][num_layers] = uniform_values
 
                 # Clifford variance
                 x_clifford = np.pi / 2 * rng.choice(range(4), size=(num_samples, vqa.num_parameters), replace=True)
                 clifford_values = jax.vmap(vqa.expval(observables))(x_clifford) # (num_samples, num_observables)
-                clifford_vars = clifford_values.var(axis=0)
-                results_clifford[num_qubits][num_layers] = clifford_vars
-
-                # Clifford variance conditioned on the presence of non-zero paulis
-
-                # Remove clifford points where all Paulis are zero
-                # (0.5 is an arbitrary numeric cutoff (all values are either near 0 or near +-1 )
-                cond_clifford_values = clifford_values[np.any(np.abs(clifford_values) > 0.5, axis=1)]
-
-                # Before computing variances, one Pauli observable with non-zero exp value needs to be excluded.
-                # Otherwise, we get biased results.
-                # Simplest way to do this is to sort, and remove the last column (should be all ones)
-                # Sorting does not affect the variance.
-
-                i_sort = np.argsort(np.abs(cond_clifford_values), axis=1)
-                cond_clifford_values = np.take_along_axis(cond_clifford_values, i_sort, axis=1)
-
-                assert np.all(np.abs(cond_clifford_values[:, -1]) > 0.5) # check that the last column has no zeros.
-                cond_clifford_values = cond_clifford_values[:, :-1]
-
-                cond_clifford_vars = cond_clifford_values.var(axis=0)
-                results_clifford_plus[num_qubits][num_layers] = cond_clifford_vars
+                # clifford_vars = clifford_values.var(axis=0)
+                self.results['clifford'][num_qubits][num_layers] = clifford_values
 
                 self.save()
 
-    def plot_results(self):
-        result_types = ('uniform', 'clifford', 'clifford+')
-        markers = ('o', 's', '^')
-        offsets = (-1, 0., 1)
-        labels = ('Uniform', 'Clifford', 'Conditioned Clifford')
-        handles = []
-        for result_type, marker, result, offset, label in zip(result_types, markers, self.results, offsets, labels):
-            self._plot_results(result, marker, offset=offset)
-            handles.append(mlines.Line2D([], [], marker=marker, markerfacecolor='None', markeredgecolor='black', linestyle='None',
-                                  markersize=10, label=label))
+        self.compute_vars_and_correlators()
 
-        plt.legend(handles=handles, loc=(0.6, 1.05))
+    @staticmethod
+    def single_correlator(v1, v2):
+        return (v1 ** 2 * v2 ** 2).mean()
+
+    @staticmethod
+    def correlator(u):
+        return jax.vmap(lambda v1: jax.vmap(lambda v2: BPExperiment.single_correlator(v1, v2), in_axes=(1,))(u), in_axes=(1,))(u)
+
+    def _plot_results(self, type, marker='o', offset=0.):
+
+        results = self.results[type]
+        qubits = sorted(list(results.keys()))
+
+        for n in qubits:
+            layers = list(results[n].keys())
+            color = Experiment._color(n, max(qubits))
+
+            plt.scatter([l + offset[0] for l in layers], [self.vars[type][n][l] for l in layers], marker=marker, color=color, s=40, alpha=0.7, edgecolors='black')
+            plt.scatter([l + offset[1] for l in layers], [self.correlators[type][n][l] * 2**n for l in layers], marker=BPExperiment.complementary_marker(marker), color=color, s=70, edgecolors='black', alpha=0.7)
+
+        Experiment._plot_lines(qubits)
+
+        plt.xlabel('Layers', fontsize=16)
+        plt.ylabel('Sample average', fontsize=16)
+        plt.yscale('log', base=2)
+        # plt.ylim(2 ** -(max(qubits) + 0.9), 2 ** -(min(qubits) - 0.9))
+
+    @staticmethod
+    def complementary_label(label):
+        return label + ' overlap'
+
+    @staticmethod
+    def complementary_marker(marker):
+        return 'P' if marker == 's' else 'X'
+
+    def plot_results(self):
+
+        result_types = ('uniform', 'clifford')
+        markers = ('s', 'D')
+        offsets = ((-0.4, 0.0), (0.4, 0.6))
+        labels = ('Uniform', 'Clifford')
+        handles = []
+        for result_type, marker, offset, label in zip(result_types, markers, offsets, labels):
+            self._plot_results(result_type, marker, offset=offset)
+            handles.append(
+                mlines.Line2D([], [], marker=marker, markerfacecolor='None', markeredgecolor='black', linestyle='None',
+                              markersize=10, label=label))
+            handles.append(mlines.Line2D([], [], marker=BPExperiment.complementary_marker(marker), markerfacecolor='None',
+                                         markeredgecolor='black', linestyle='None',
+                                         markersize=10, label=BPExperiment.complementary_label(label)))
+
+        plt.legend(handles=[handles[0], handles[2], handles[1], handles[3]], loc=(0.65, 1.15))
+        plt.title('Variance and overlaps of single-Pauli \n loss functions in HEA', fontsize=16)
 
 
 class ExactMinExperiment(Experiment):
@@ -187,7 +231,7 @@ class ExactMinExperiment(Experiment):
 
         rng = np.random.default_rng(seed)
         for num_qubits, num_layers in tqdm(zip(qubits, layers)):
-                vqa = LocalVQA(num_qubits, num_layers)
+                vqa = HEA(num_qubits, num_layers)
                 observables = all_two_body_pauli(num_qubits)
 
                 if num_test_clifford_points is None:
@@ -214,7 +258,7 @@ class ExactMinExperiment(Experiment):
 
 
     def single_run(self,
-                   vqa: LocalVQA,
+                   vqa: HEA,
                    pauli_terms: PauliTerms,
                    num_test_clifford_points: int,
                    num_test_uniform_points: int,
@@ -243,7 +287,7 @@ class ExactMinExperiment(Experiment):
 
     @staticmethod
     def propose_exact_minimum(
-            vqa: LocalVQA,
+            vqa: HEA,
             pauli_terms: PauliTerms,
             num_test_clifford_points: int,
             rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
@@ -292,7 +336,7 @@ class ExactMinExperiment(Experiment):
 
     @staticmethod
     def _gradient_values(
-            vqa: LocalVQA,
+            vqa: HEA,
             paulis: Sequence[str],
             x: np.ndarray,
             i_fixed: np.ndarray,
@@ -342,7 +386,7 @@ class ExactMinExperiment(Experiment):
 
     def nonzero_gradient_rate(
             self,
-            vqa: LocalVQA,
+            vqa: HEA,
             paulis: Sequence[str],
             x: np.array,
             i_fixed: np.array,
@@ -380,7 +424,7 @@ class ExactMinExperiment(Experiment):
 
     @staticmethod
     def find_nonzero_pauli(
-            vqa: LocalVQA,
+            vqa: HEA,
             paulis: Sequence[str],
             x: np.ndarray,
             i_fixed: np.ndarray,
@@ -413,7 +457,7 @@ class ExactMinExperiment(Experiment):
 
     @staticmethod
     def find_indices_of_fixed_angles(
-            vqa: LocalVQA,
+            vqa: HEA,
             pauli: str,
             x: np.ndarray
     ) -> np.ndarray:
@@ -449,7 +493,7 @@ class ExactMinExperiment(Experiment):
         handle_average = mlines.Line2D([], [], marker='s', markeredgecolor='black', markerfacecolor='None', linestyle='None',
                                   markersize=10, label='Sample average')
 
-        plt.ylim(2 ** -(max(qubits)+0.9), 2 ** -(min(qubits) - 0.9))
+        # plt.ylim(2 ** -(max(qubits)+0.9), 2 ** -(min(qubits) - 0.9))
         plt.yscale('log', base=2)
 
         plt.ylabel('Vanishing probability')

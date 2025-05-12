@@ -7,7 +7,7 @@ from qiskit.quantum_info import Statevector, Pauli
 # from catalyst import qjit, for_loop
 
 from pauli import random_local_two_body_pauli, all_two_body_pauli
-from traps import LocalVQA
+from traps import HEA
 
 import pennylane as qml
 
@@ -16,7 +16,7 @@ def test_expvals():
     num_qubits = 6
     num_layers = 5
 
-    vqa = LocalVQA(num_qubits, num_layers)
+    vqa = HEA(num_qubits, num_layers)
     paulis = all_two_body_pauli(num_qubits)
 
     x = vqa.random_parameters()
@@ -34,7 +34,7 @@ def test_penny_circuit():
 
     num_qubits = 4
     num_layers = 3
-    vqa = LocalVQA(num_qubits, num_layers)
+    vqa = HEA(num_qubits, num_layers)
 
     dev0 = qml.device('lightning.qubit', wires=num_qubits)
     @qml.qnode(dev0)
@@ -63,7 +63,7 @@ def test_penny_circuit():
 
 
 def test_grads(num_qubits, num_layers):
-    vqa = LocalVQA(num_qubits, num_layers)
+    vqa = HEA(num_qubits, num_layers)
     obs = random_local_two_body_pauli(vqa.num_qubits)
 
     p0 = vqa.random_clifford_parameters()

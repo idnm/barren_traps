@@ -11,34 +11,28 @@ from qiskit.circuit import Parameter
 from qiskit.quantum_info import Clifford, Pauli
 
 
-class LocalVQA:
-    def __init__(self, num_qubits: int, num_layers: int):
+class HEA:
+    def __init__(self, num_qubits: int, num_layers: int, seed: int = 0):
 
         assert num_qubits % 2 == 0
         self.num_qubits = num_qubits
         self.num_layers = num_layers
 
         # Parameters for qiskit circuit
-        self._x0 = [Parameter(f'x{n}') for n in range(self.num_qubits)]
-        self._z0 = [Parameter(f'z{n}') for n in range(self.num_qubits)]
         self._x = [[Parameter(f'x{n}{l}') for n in range(self.num_qubits)] for l in range(self.num_layers)]
-        self._z = [[Parameter(f'z{n}{l}') for n in range(self.num_qubits)] for l in range(self.num_layers)]
 
-    @property
-    def num_initial_parameters(self) -> int:
-        return 2 * self.num_qubits
+        rng = np.random.default_rng(seed)
+        paulis = ('X', 'Y', 'Z')
 
-    @property
-    def num_entangling_parameters(self) -> int:
-        return 2 * self.num_qubits * self.num_layers
+        self.paulis = [[rng.choice(paulis) for _ in range(self.num_qubits)] for _ in range(self.num_layers)]
 
     @property
     def num_parameters(self) -> int:
-        return self.num_initial_parameters + self.num_entangling_parameters
+        return self.num_qubits * self.num_layers
 
     @property
     def _flat_params(self) -> List[Parameter]:
-        return self._x0 + self._z0 + [xnl for xn in self._x for xnl in xn] + [znl for zn in self._z for znl in zn]
+        return [xij for xi in self._x for xij in xi]
 
     def _params_dict(self, params: np.ndarray) -> dict:
         return dict(zip(self._flat_params, params))
@@ -47,21 +41,32 @@ class LocalVQA:
     def initial_circuit(self):
         qc = QuantumCircuit(self.num_qubits)
         for n in range(self.num_qubits):
-            qc.rx(self._x0[n], n)
-            qc.rz(self._z0[n], n)
+            qc.ry(np.pi / 4, n)
 
         return qc
 
-    def entangling_layer(self, x, z, start=0):
+    def cnot_layer(self):
         qc = QuantumCircuit(self.num_qubits)
-        for n in range(start, self.num_qubits + start, 2):
-            i = n % self.num_qubits
-            j = (n + 1) % self.num_qubits
-            qc.cz(i, j)
 
-        for n in range(self.num_qubits):
-            qc.rx(x[n], n)
-            qc.rz(z[n], n)
+        for n in range(self.num_qubits-1):
+            qc.cx(n, (n + 1))
+
+        return qc
+
+    def entangling_layer(self, l, x):
+        qc = QuantumCircuit(self.num_qubits)
+
+        for n, gate in enumerate(self.paulis[l]):
+            if gate == 'X':
+                qc.rx(x[n], n)
+            elif gate == 'Y':
+                qc.ry(x[n], n)
+            elif gate == 'Z':
+                qc.rz(x[n], n)
+            else:
+                raise ValueError(f'Unknown gate {gate}')
+
+        qc.compose(self.cnot_layer(), inplace=True)
 
         return qc
 
@@ -70,22 +75,13 @@ class LocalVQA:
         qc = QuantumCircuit(self.num_qubits)
 
         s = 0
-        for xi, zi in zip(self._x, self._z):
-            qc.compose(self.entangling_layer(xi, zi, start=s), inplace=True)
-            s = 1 - s
+        for l, xi in enumerate(self._x):
+            qc.compose(self.entangling_layer(l, xi), inplace=True)
 
         return qc
 
     def split_params(self, params: np.ndarray) -> Sequence[np.ndarray]:
-        n = self.num_qubits
-        x0 = params[:n]
-        z0 = params[n: 2 * n]
-
-        num_x = len(params[2 * n:]) // 2
-        x = params[2 * n: 2 * n + num_x]
-        z = params[2 * n + num_x:]
-
-        return x0, z0, x.reshape(self.num_layers, self.num_qubits), z.reshape(self.num_layers, self.num_qubits)
+        return params.reshape(self.num_layers, self.num_qubits)
 
     @property
     def qiskit_circuit(self) -> QuantumCircuit:
@@ -99,22 +95,23 @@ class LocalVQA:
         return qml.from_qiskit(self.qiskit_circuit)
 
     def penny_circuit(self, params):
-        x0, z0, x, z = self.split_params(params)
+        x = self.split_params(params)
+        pauli_mask_x = jnp.array([[pij == 'X' for pij in pi] for pi in self.paulis], dtype=bool)
+        pauli_mask_y = jnp.array([[pij == 'Y' for pij in pi] for pi in self.paulis], dtype=bool)
+        pauli_mask_z = jnp.array([[pij == 'Z' for pij in pi] for pi in self.paulis], dtype=bool)
 
         for n in range(self.num_qubits):
-            qml.RX(x0[n], wires=n)
-            qml.RZ(z0[n], wires=n)
+            qml.RY(np.pi / 4, wires=n)
 
         def entangling_layer(l):
-            start = l % 2
-            for n in range(0, self.num_qubits, 2):
-                i = (n + start) % self.num_qubits
-                j = (n + start + 1) % self.num_qubits
-                qml.CZ(wires=(i, j))
 
             for n in range(self.num_qubits):
-                qml.RX(x[l, n], wires=n)
-                qml.RZ(z[l, n], wires=n)
+                qml.RX(x[l, n] * pauli_mask_x[l, n], wires=n)
+                qml.RY(x[l, n] * pauli_mask_y[l, n], wires=n)
+                qml.RZ(x[l, n] * pauli_mask_z[l, n], wires=n)
+
+            for n in range(self.num_qubits-1):
+                qml.CNOT(wires=(n, (n + 1)))
 
         if self.num_layers > 0:
             qml.for_loop(0, self.num_layers, 1)(entangling_layer)()

@@ -8,7 +8,7 @@ import numpy as np
 import optax
 
 from experiments import BPExperiment, ExactMinExperiment
-from traps import LocalVQA
+from traps import HEA
 
 # jax.config.update("jax_enable_x64", True)
 
