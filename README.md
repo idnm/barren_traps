@@ -1,0 +1,3 @@
+Source code for numerical results reported in ...
+
+Data produced by running `run_bp_experiments.py`, the plot can be viewed in `hea_plot.ipynb`.
